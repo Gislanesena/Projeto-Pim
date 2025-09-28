@@ -1,0 +1,360 @@
+import os
+from flask import Flask, jsonify, request, Response, redirect, url_for, render_template
+from flask_cors import CORS
+import sqlite3
+import io
+import csv
+
+# Inicialização do Flask: É CRÍTICO informar onde estão as pastas templates e static
+app = Flask(__name__, template_folder='templates', static_folder='static')
+CORS(app)
+
+def get_db_connection():
+    db_path = os.path.join('Banco de Dados', 'datacenter.db')
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row # Permite acessar colunas por nome (ex: row['nome'])
+    return conn
+
+# --- ROTAS DA API ---
+
+@app.route('/funcionarios', methods=['GET'])
+def get_all_funcionarios():
+    conn = get_db_connection()
+    try:
+        # Verifique se a coluna é 'id' (minúsculo) ou 'ID' (maiúsculo) no seu banco de dados.
+        # Ajuste o SELECT e as referências em todo o código Python conforme necessário.
+        funcionarios = conn.execute('SELECT * FROM banco_dados').fetchall()
+        funcionarios_list = [dict(funcionario) for funcionario in funcionarios]
+        return jsonify(funcionarios_list)
+    except Exception as e:
+        print(f"Erro ao buscar todos os funcionários: {str(e)}")
+        return jsonify({'message': f'Erro interno do servidor: {str(e)}'}), 500
+    finally:
+        conn.close()
+
+@app.route('/funcionarios/<int:funcionario_id>', methods=['GET'])
+def get_funcionario_by_id(funcionario_id):
+    conn = get_db_connection()
+    try:
+        # Verifique 'id' ou 'ID' no seu banco de dados
+        funcionario = conn.execute('SELECT * FROM banco_dados WHERE id = ?', (funcionario_id,)).fetchone()
+        if funcionario is None:
+            return jsonify({'message': 'Funcionário não encontrado'}), 404
+        return jsonify(dict(funcionario))
+    except Exception as e:
+        print(f"Erro ao buscar funcionário por ID: {str(e)}")
+        return jsonify({'message': f'Erro interno do servidor: {str(e)}'}), 500
+    finally:
+        conn.close()
+
+@app.route('/funcionarios', methods=['POST'])
+def add_funcionario():
+    new_data = request.get_json()
+    conn = get_db_connection()
+    try:
+        nome = new_data.get('nome')
+        cpf = new_data.get('cpf')
+        senha = new_data.get('senha', cpf) # Senha em texto puro para este exemplo, usa CPF como default
+        endereco = new_data.get('endereco')
+        salario = new_data.get('salario')
+        data_admissao = new_data.get('data_admissao')
+        cargo = new_data.get('cargo')
+        setor = new_data.get('setor')
+        telefone = new_data.get('telefone')
+        status = new_data.get('status', 'Ativo')
+
+        if not all([nome, cpf, endereco, salario, data_admissao, cargo, setor, telefone]):
+            return jsonify({'message': 'Erro: Faltam dados obrigatórios para adicionar funcionário.'}), 400
+
+        conn.execute(
+            "INSERT INTO banco_dados (nome, senha, endereco, salario, data_admissao, cpf, cargo, setor, telefone, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (nome, senha, endereco, salario, data_admissao, cpf, cargo, setor, telefone, status)
+        )
+        conn.commit()
+        novo_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        return jsonify({'message': 'Funcionário adicionado com sucesso', 'ID': novo_id}), 201
+    except sqlite3.IntegrityError as e:
+        conn.rollback()
+        return jsonify({'message': f'Erro de integridade (duplicidade de CPF?): {str(e)}'}), 409
+    except Exception as e:
+        conn.rollback()
+        print(f"Erro ao adicionar funcionário: {str(e)}")
+        return jsonify({'message': f'Erro interno do servidor ao adicionar funcionário: {str(e)}'}), 500
+    finally:
+        conn.close()
+
+@app.route('/funcionarios/<int:funcionario_id>', methods=['PUT'])
+def update_funcionario(funcionario_id):
+    update_data = request.get_json()
+    conn = get_db_connection()
+    try:
+        campos_para_atualizar = []
+        valores_para_atualizar = []
+
+        # Adiciona campos à lista apenas se eles estiverem presentes no JSON de entrada
+        if 'nome' in update_data:
+            campos_para_atualizar.append('nome = ?')
+            valores_para_atualizar.append(update_data['nome'])
+        # Se 'senha' não é esperada ou não vem do frontend, não a inclua aqui.
+        # Se você precisa que a senha possa ser atualizada separadamente,
+        # adicione 'senha' no formulário de edição do HTML e aqui.
+        # Exemplo:
+        # if 'senha' in update_data:
+        #     campos_para_atualizar.append('senha = ?')
+        #     valores_para_atualizar.append(update_data['senha'])
+        if 'endereco' in update_data:
+            campos_para_atualizar.append('endereco = ?')
+            valores_para_atualizar.append(update_data['endereco'])
+        if 'salario' in update_data:
+            campos_para_atualizar.append('salario = ?')
+            valores_para_atualizar.append(update_data['salario'])
+        if 'data_admissao' in update_data:
+            campos_para_atualizar.append('data_admissao = ?')
+            valores_para_atualizar.append(update_data['data_admissao'])
+        if 'cpf' in update_data:
+            campos_para_atualizar.append('cpf = ?')
+            valores_para_atualizar.append(update_data['cpf'])
+        if 'cargo' in update_data:
+            campos_para_atualizar.append('cargo = ?')
+            valores_para_atualizar.append(update_data['cargo'])
+        if 'setor' in update_data:
+            campos_para_atualizar.append('setor = ?')
+            valores_para_atualizar.append(update_data['setor'])
+        if 'telefone' in update_data:
+            campos_para_atualizar.append('telefone = ?')
+            valores_para_atualizar.append(update_data['telefone'])
+        if 'status' in update_data:
+            campos_para_atualizar.append('status = ?')
+            valores_para_atualizar.append(update_data['status'])
+
+        if not campos_para_atualizar:
+            return jsonify({'message': 'Nenhum dado fornecido para atualização'}), 400
+
+        query_set = ", ".join(campos_para_atualizar)
+        # Verifique 'id' ou 'ID' no seu banco de dados
+        query = f"UPDATE banco_dados SET {query_set} WHERE id = ?"
+        valores_para_atualizar.append(funcionario_id)
+
+        conn.execute(query, tuple(valores_para_atualizar))
+        conn.commit()
+
+        if conn.total_changes == 0:
+            # Verifica se o funcionário existe antes de dizer que não houve alteração
+            funcionario_existente = conn.execute('SELECT id FROM banco_dados WHERE id = ?', (funcionario_id,)).fetchone()
+            if funcionario_existente:
+                return jsonify({'message': 'Funcionário encontrado, mas nenhum dado foi alterado (dados iguais ou nenhum campo editável enviado).'}), 200
+            else:
+                return jsonify({'message': 'Funcionário não encontrado'}), 404
+        return jsonify({'message': f'Funcionário {funcionario_id} atualizado com sucesso'})
+    except sqlite3.IntegrityError as e:
+        conn.rollback()
+        return jsonify({'message': f'Erro de integridade (CPF duplicado?): {str(e)}'}), 409
+    except Exception as e:
+        conn.rollback()
+        print(f"Erro ao atualizar funcionário {funcionario_id}: {str(e)}")
+        return jsonify({'message': f'Erro interno do servidor ao atualizar funcionário: {str(e)}'}), 500
+    finally:
+        conn.close()
+
+@app.route('/funcionarios/<int:funcionario_id>', methods=['DELETE'])
+def delete_funcionario(funcionario_id):
+    conn = get_db_connection()
+    try:
+        # Verifique 'id' ou 'ID' no seu banco de dados
+        conn.execute('DELETE FROM banco_dados WHERE id = ?', (funcionario_id,))
+        conn.commit()
+        if conn.total_changes == 0:
+            return jsonify({'message': 'Funcionário não encontrado'}), 404
+        return jsonify({'message': f'Funcionário {funcionario_id} removido com sucesso'})
+    except Exception as e:
+        conn.rollback()
+        print(f"Erro ao remover funcionário {funcionario_id}: {str(e)}")
+        return jsonify({'message': f'Erro interno do servidor ao remover funcionário: {str(e)}'}), 500
+    finally:
+        conn.close()
+
+# Rota para dados do Dashboard, agora aceita filtro de setor (para Gerentes)
+@app.route('/dashboard/stats', methods=['GET'])
+def get_dashboard_stats():
+    setor_filtro = request.args.get('setor')
+
+    conn = get_db_connection()
+    try:
+        # Consultas base
+        total_funcionarios_query = 'SELECT COUNT(*) FROM banco_dados'
+        total_departamentos_query = 'SELECT COUNT(DISTINCT setor) FROM banco_dados'
+        contratacoes_query = "SELECT COUNT(*) FROM banco_dados WHERE strftime('%Y', data_admissao) = strftime('%Y', 'now')"
+        folha_pagamento_query = 'SELECT SUM(salario) FROM banco_dados'
+
+        # Adiciona condição WHERE se houver filtro de setor (para Gerentes)
+        if setor_filtro:
+            total_funcionarios_query += f" WHERE setor = '{setor_filtro}'"
+            contratacoes_query += f" AND setor = '{setor_filtro}'"
+            folha_pagamento_query += f" WHERE setor = '{setor_filtro}'"
+            total_departamentos = 1 # Se filtra por 1 setor, só tem 1 "departamento" visível
+        else:
+            total_departamentos = conn.execute(total_departamentos_query).fetchone()[0]
+
+
+        total_funcionarios = conn.execute(total_funcionarios_query).fetchone()[0]
+        contratacoes_ano_atual = conn.execute(contratacoes_query).fetchone()[0]
+        folha_pagamento_total = conn.execute(folha_pagamento_query).fetchone()[0]
+        
+        stats = {
+            'total_funcionarios': total_funcionarios,
+            'total_departamentos': total_departamentos,
+            'contratacoes_2025': contratacoes_ano_atual, # Ou altere '2025' para o ano atual dinamicamente se desejar
+            'folha_pagamento': folha_pagamento_total if folha_pagamento_total else 0
+        }
+        
+        return jsonify(stats)
+    except Exception as e:
+        print(f"Erro ao obter estatísticas do dashboard: {str(e)}")
+        return jsonify({'message': f'Erro interno do servidor ao obter estatísticas: {str(e)}'}), 500
+    finally:
+        conn.close()
+
+@app.route('/departamentos/contagem', methods=['GET'])
+def get_department_counts():
+    conn = get_db_connection()
+    try:
+        query_result = conn.execute('SELECT setor, COUNT(*) as quantidade FROM banco_dados GROUP BY setor').fetchall()
+        department_counts = {row['setor']: row['quantidade'] for row in query_result}
+        return jsonify(department_counts)
+    except Exception as e:
+        print(f"Erro ao obter contagem de departamentos: {str(e)}")
+        return jsonify({'message': f'Erro interno do servidor ao obter contagem de departamentos: {str(e)}'}), 500
+    finally:
+        conn.close()
+
+@app.route('/relatorios/<string:tipo>', methods=['GET'])
+def gerar_relatorio(tipo):
+    conn = get_db_connection()
+    try:
+        if tipo == 'ativos':
+            query = "SELECT id, nome, cpf, cargo, setor, data_admissao FROM banco_dados WHERE status = 'Ativo'"
+        elif tipo == 'inativos':
+            query = "SELECT id, nome, cpf, cargo, setor, data_admissao FROM banco_dados WHERE status = 'Inativo'"
+        elif tipo == 'novas_contratacoes':
+            query = "SELECT id, nome, cpf, cargo, setor, data_admissao FROM banco_dados WHERE strftime('%Y', data_admissao) = strftime('%Y', 'now')"
+        else:
+            return jsonify({'message': 'Tipo de relatório inválido'}), 404
+
+        funcionarios = conn.execute(query).fetchall()
+
+        output = io.StringIO()
+        writer = csv.writer(output)
+        header = ['ID', 'Nome', 'CPF', 'Cargo', 'Setor', 'Data de Admissão']
+        writer.writerow(header)
+        for funcionario in funcionarios:
+            writer.writerow(list(funcionario))
+            
+        output.seek(0)
+
+        return Response(
+            output,
+            mimetype="text/csv",
+            headers={"Content-Disposition": f"attachment;filename=relatorio_{tipo}.csv"}
+        )
+    except Exception as e:
+        print(f"Erro ao gerar relatório '{tipo}': {str(e)}")
+        return jsonify({'message': f'Erro interno do servidor ao gerar relatório: {str(e)}'}), 500
+    finally:
+        conn.close()
+
+@app.route('/funcionarios/buscar', methods=['GET'])
+def buscar_funcionarios():
+    termo = request.args.get('termo', '')
+
+    if not termo:
+        return jsonify([])
+
+    conn = get_db_connection()
+    try:
+        termo_like = f'%{termo}%'
+
+        # Busca por nome, CPF ou ID. Verifique 'id' ou 'ID' no seu banco de dados
+        query = "SELECT * FROM banco_dados WHERE nome LIKE ? OR cpf = ? OR id = ?"
+        funcionarios = conn.execute(query, (termo_like, termo, termo)).fetchall()
+        funcionarios_list = [dict(f) for f in funcionarios]
+        
+        return jsonify(funcionarios_list)
+    except Exception as e:
+        print(f"Erro ao buscar funcionários com termo '{termo}': {str(e)}")
+        return jsonify({'message': f'Erro interno do servidor ao buscar funcionários: {str(e)}'}), 500
+    finally:
+        conn.close()
+
+@app.route('/login', methods=['POST'])
+def login():
+    data = request.get_json()
+    username_input = data.get('username')
+    password_input = data.get('password')
+
+    conn = get_db_connection()
+    try:
+        # Verifique 'id' ou 'ID' no seu banco de dados
+        user_data = conn.execute(
+            'SELECT id, senha, cargo, setor FROM banco_dados WHERE (id = ? OR cpf = ?) AND senha = ?',
+            (username_input, username_input, password_input)
+        ).fetchone()
+
+        if user_data:
+            redirect_page = ''
+            if user_data['cargo'] in ['Diretor', 'Recursos Humanos', 'Gerente', 'Supervisor']:
+                redirect_page = url_for('get_dashboard_page')
+            elif user_data['cargo'] == 'Colaborador':
+                redirect_page = url_for('get_funcionarios_page')
+            else:
+                redirect_page = url_for('get_dashboard_page') # Padrão para outros cargos
+
+            return jsonify({
+                'message': 'Login bem-sucedido!',
+                'redirect_to': redirect_page,
+                'cargo': user_data['cargo'],
+                'id': user_data['id'], # Use 'id' ou 'ID' conforme o nome da coluna no DB
+                'setor': user_data['setor']
+            }), 200
+        else:
+            return jsonify({'message': 'Usuário ou senha inválidos.'}), 401
+    except Exception as e:
+        print(f"Erro durante o login para usuário '{username_input}': {str(e)}")
+        return jsonify({'message': f'Erro interno do servidor durante o login: {str(e)}'}), 500
+    finally:
+        conn.close()
+
+# --- ROTAS PARA SERVIR AS PÁGINAS HTML (usando render_template) ---
+@app.route('/')
+def index():
+    return redirect(url_for('get_login_page'))
+
+@app.route('/dashboard.html')
+def get_dashboard_page():
+    return render_template('dashboard.html')
+
+@app.route('/cadastro.html')
+def get_cadastro_page():
+    return render_template('cadastro.html')
+ 
+@app.route('/funcionarios.html')
+def get_funcionarios_page():
+    return render_template('funcionarios.html')
+
+@app.route('/departamentos.html')
+def get_departamentos_page():
+    return render_template('departamentos.html')
+
+@app.route('/login.html')
+def get_login_page():
+    return render_template('login.html')
+
+# Contexto da aplicação para imprimir rotas (bom para depuração local)
+with app.app_context():
+    print("\n--- Rotas Flask Registradas ---")
+    for rule in app.url_map.iter_rules():
+        print(f"Endpoint: {rule.endpoint}, Métodos: {rule.methods}, Rota: {rule.rule}")
+    print("-----------------------------\n")
+
+if __name__ == '__main__':
+    print(f"--- O servidor está rodando no diretório: {os.getcwd()} ---")
+    app.run(host='0.0.0.0', debug=True)
